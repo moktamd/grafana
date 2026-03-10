@@ -881,4 +881,8 @@ const (
 	// FlagAnalyticsFramework
 	// Enables new analytics framework
 	FlagAnalyticsFramework = "analyticsFramework"
+
+	// FlagAlertingDatasourceSync
+	// Automatically sync Mimir Alertmanager datasource configuration as ExtraConfiguration in Grafana
+	FlagAlertingDatasourceSync = "alertingDatasourceSync"
 )

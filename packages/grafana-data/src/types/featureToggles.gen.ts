@@ -1627,4 +1627,9 @@ export interface FeatureToggles {
   * @default false
   */
   analyticsFramework?: boolean;
+  /**
+  * Automatically sync Mimir Alertmanager datasource configuration as ExtraConfiguration in Grafana
+  * @default false
+  */
+  alertingDatasourceSync?: boolean;
 }

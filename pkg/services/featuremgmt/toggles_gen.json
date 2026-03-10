@@ -244,6 +244,19 @@
     },
     {
       "metadata": {
+        "name": "alertingDatasourceSync",
+        "resourceVersion": "1773091260425",
+        "creationTimestamp": "2026-03-09T21:21:00Z"
+      },
+      "spec": {
+        "description": "Automatically sync Mimir Alertmanager datasource configuration as ExtraConfiguration in Grafana",
+        "stage": "experimental",
+        "codeowner": "@grafana/alerting-squad",
+        "expression": "false"
+      }
+    },
+    {
+      "metadata": {
         "name": "alertingDisableDMAinUI",
         "resourceVersion": "1771434338561",
         "creationTimestamp": "2026-02-18T17:05:38Z"
