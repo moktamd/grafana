@@ -1553,6 +1553,11 @@ export interface FeatureToggles {
   */
   kubernetesUsersApi?: boolean;
   /**
+  * Enables team APIs in the app platform
+  * @default false
+  */
+  kubernetesTeamsApi?: boolean;
+  /**
   * Enables service account APIs in the app platform
   * @default false
   */
