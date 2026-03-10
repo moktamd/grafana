@@ -7,13 +7,20 @@ import (
 	"strings"
 	"time"
 
+	authlib "github.com/grafana/authlib/types"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/registry/rest"
 
+	"github.com/grafana/grafana/apps/provisioning/pkg/apis/auth"
 	provisioning "github.com/grafana/grafana/apps/provisioning/pkg/apis/provisioning/v0alpha1"
 	"github.com/grafana/grafana/apps/provisioning/pkg/repository"
+	"github.com/grafana/grafana/apps/provisioning/pkg/safepath"
+	"github.com/grafana/grafana/pkg/apimachinery/utils"
 	"github.com/grafana/grafana/pkg/registry/apis/provisioning/jobs"
+	"github.com/grafana/grafana/pkg/registry/apis/provisioning/resources"
 )
 
 type JobQueueGetter interface {
@@ -25,6 +32,8 @@ type jobsConnector struct {
 	statusPatcherProvider StatusPatcherProvider
 	jobs                  JobQueueGetter
 	historic              jobs.HistoryReader
+	access                auth.AccessChecker
+	clients               resources.ClientFactory
 }
 
 func NewJobsConnector(
@@ -32,12 +41,16 @@ func NewJobsConnector(
 	statusPatcherProvider StatusPatcherProvider,
 	jobs JobQueueGetter,
 	historic jobs.HistoryReader,
+	access auth.AccessChecker,
+	clients resources.ClientFactory,
 ) *jobsConnector {
 	return &jobsConnector{
 		repoGetter:            repoGetter,
 		statusPatcherProvider: statusPatcherProvider,
 		jobs:                  jobs,
 		historic:              historic,
+		access:                access,
+		clients:               clients,
 	}
 }
 
@@ -169,6 +182,14 @@ func (c *jobsConnector) Connect(
 			}
 		}
 
+		// Pre-flight authorization: verify the user has delete permissions on the targeted resources
+		if spec.Action == provisioning.JobActionDelete && spec.Delete != nil {
+			if err := c.authorizeDeleteTargets(ctx, cfg, spec.Delete); err != nil {
+				responder.Error(err)
+				return
+			}
+		}
+
 		job, err := c.jobs.GetJobQueue().Insert(ctx, cfg.Namespace, spec)
 		if err != nil {
 			responder.Error(err)
@@ -201,6 +222,85 @@ func (c *jobsConnector) Connect(
 
 		responder.Object(http.StatusAccepted, job)
 	}), 30*time.Second), nil
+}
+
+// authorizeDeleteTargets checks that the user has delete permissions on all
+// targeted resources/folders before the job is queued. Checks are deduplicated
+// by {folderID, group, resource} so multiple targets in the same folder only
+// trigger a single access check.
+func (c *jobsConnector) authorizeDeleteTargets(ctx context.Context, cfg *provisioning.Repository, opts *provisioning.DeleteJobOptions) error {
+	type permKey struct {
+		folderID string
+		group    string
+		resource string
+	}
+	checked := make(map[permKey]struct{})
+
+	check := func(group, resource, folderID string) error {
+		key := permKey{folderID: folderID, group: group, resource: resource}
+		if _, done := checked[key]; done {
+			return nil
+		}
+		checked[key] = struct{}{}
+
+		return c.access.Check(ctx, authlib.CheckRequest{
+			Verb:     utils.VerbDelete,
+			Group:    group,
+			Resource: resource,
+		}, folderID)
+	}
+
+	for _, path := range opts.Paths {
+		folderID := resources.ParentFolder(path, cfg)
+		if safepath.IsDir(path) {
+			if err := check(resources.FolderResource.Group, resources.FolderResource.Resource, folderID); err != nil {
+				return fmt.Errorf("authorize delete folder %q: %w", path, err)
+			}
+		} else {
+			if err := check(resources.DashboardResource.Group, resources.DashboardResource.Resource, folderID); err != nil {
+				return fmt.Errorf("authorize delete file %q: %w", path, err)
+			}
+		}
+	}
+
+	if len(opts.Resources) > 0 {
+		clients, err := c.clients.Clients(ctx, cfg.Namespace)
+		if err != nil {
+			return fmt.Errorf("create clients for authorization: %w", err)
+		}
+
+		for _, ref := range opts.Resources {
+			gvk := schema.GroupVersionKind{Group: ref.Group, Kind: ref.Kind}
+			client, gvr, err := clients.ForKind(ctx, gvk)
+			if err != nil {
+				return fmt.Errorf("get client for %s/%s: %w", ref.Group, ref.Kind, err)
+			}
+
+			obj, err := client.Get(ctx, ref.Name, metav1.GetOptions{})
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return fmt.Errorf("authorize delete resource %s/%s/%s: %w", ref.Group, ref.Kind, ref.Name, err)
+			}
+
+			meta, err := utils.MetaAccessor(obj)
+			if err != nil {
+				return fmt.Errorf("get metadata for %s/%s/%s: %w", ref.Group, ref.Kind, ref.Name, err)
+			}
+
+			folderID := meta.GetFolder()
+			if folderID == "" {
+				folderID = resources.RootFolder(cfg)
+			}
+
+			if err := check(gvr.Group, gvr.Resource, folderID); err != nil {
+				return fmt.Errorf("authorize delete %s/%s/%s: %w", ref.Group, ref.Kind, ref.Name, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 var (
